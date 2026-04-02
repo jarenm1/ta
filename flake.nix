@@ -73,6 +73,9 @@
           
           npmDepsHash = "sha256-4dm7GMCsRAgfQILmx7kBb4C5fVbXuZyKAkGlXTla3x8=";
           
+          # Fix npm cache permission issues
+          makeCacheWritable = true;
+          
           nativeBuildInputs = with pkgs; [
             nodejs
             python3
