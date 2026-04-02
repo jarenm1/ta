@@ -11,6 +11,7 @@ This server exposes Canvas LMS course data to an MCP client so an agent can buil
 - `create_study_guide`
 - `create_coding_problem`
 - `create_quiz`
+- `bulk_download_files`
 
 It also exposes resource templates for:
 
@@ -263,7 +264,48 @@ Each question includes:
 - `explanation`
 - `source_refs`
 
-## Current limitation
+### `bulk_download_files`
 
-Binary file extraction is not implemented yet. Uploaded PDFs and Office documents are stored and
-listed in the course knowledge base, but only text-like files are indexed for agent use today.
+Required input fields:
+
+- `courseId`
+- `fileIds` (array of Canvas file IDs)
+
+Optional fields:
+
+- `maxTextChars` (default 12000)
+- `maxFileSize` (default 50MB)
+- `concurrency` (1-5, default 3)
+- `includeTextContent`
+- `session`
+
+Structured output includes:
+
+- `courseId`
+- `requested` (total files requested)
+- `downloaded` (successfully downloaded)
+- `saved` (saved to knowledge base)
+- `failed` (failed count)
+- `materials` (array of downloaded file metadata with extraction info)
+- `errors` (array of error details)
+
+This tool downloads multiple files from Canvas, automatically extracts text from binary files (PDFs, Office documents, images), and saves everything to the course knowledge base. The agent can then use `get_course_knowledge_base` to access the extracted content.
+
+## File Extraction Support
+
+The MCP server now extracts text from the following binary file types:
+
+- **PDFs** - Full text extraction with page count metadata
+- **Word Documents** (.docx) - Text extraction with formatting notes
+- **Excel Spreadsheets** (.xlsx, .xls) - CSV-style text extraction with sheet metadata
+- **PowerPoint** (.pptx, .ppt) - Slide-by-slide text extraction
+- **Images** (.png, .jpg, .jpeg, .gif, .bmp, .webp, .tiff, .tif) - OCR text extraction with confidence scores
+
+Extracted content is stored alongside metadata in the knowledge base and included in study guides, coding problems, and quizzes.
+
+## Current limitations
+
+- Very large files (configurable limit, default 50MB) are skipped to prevent memory issues
+- OCR quality depends on image resolution and clarity
+- Some complex PDF layouts may lose formatting during extraction
+- Binary files in Canvas must be downloaded via `bulk_download_files` before extraction (raw course data files are auto-extracted)

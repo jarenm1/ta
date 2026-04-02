@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { extractBinaryFileText, isBinaryExtractable } from './file-extractor.mjs';
 
 const COURSE_MATERIALS_ENV_VAR = 'TA_COURSE_MATERIALS_DIR';
 const RAW_COURSE_DATA_ENV_VAR = 'TA_RAW_COURSE_DATA_DIR';
@@ -12,6 +13,8 @@ const DEFAULT_MAX_TEXT_CHARS = 12000;
 const DEFAULT_MAX_RAW_FILES = 150;
 const RAW_TEXT_EXTENSIONS = new Set([
   '.c', '.cc', '.cpp', '.csv', '.h', '.hpp', '.htm', '.html', '.java', '.js', '.json', '.md', '.markdown', '.py', '.sql', '.svg', '.tex', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml',
+  '.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.ppt',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif',
 ]);
 const IGNORED_DIRECTORY_NAMES = new Set(['.git', '.idea', '.vscode', 'node_modules', '__pycache__']);
 
@@ -59,7 +62,7 @@ function stripHtml(value) {
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li|tr|section|article|h[1-6]|td|th|ul|ol|pre)>/gi, '\n')
+      .replace(/<(p|div|li|tr|section|article|h[1-6]|td|th|ul|ol|pre)>/gi, '\n')
       .replace(/<[^>]+>/g, ' '),
   );
 }
@@ -82,7 +85,7 @@ function slugifySegment(value) {
   return String(value || '')
     .toLowerCase()
     .trim()
-    .replace(/['’]/g, '')
+    .replace(/['']/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .replace(/-{2,}/g, '-');
@@ -174,6 +177,11 @@ async function findRawCourseDirectories(courseId, course = {}) {
     .map((entry) => entry.absolutePath);
 }
 
+function isExtractableFile(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  return RAW_TEXT_EXTENSIONS.has(extension) || isBinaryExtractable(filePath);
+}
+
 async function walkRawCourseFiles(rootDirectory, options = {}) {
   const discoveredFiles = [];
   const maxFiles = Math.max(20, Number(options.maxRawFiles) || DEFAULT_MAX_RAW_FILES);
@@ -201,7 +209,7 @@ async function walkRawCourseFiles(rootDirectory, options = {}) {
         continue;
       }
 
-      if (!RAW_TEXT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+      if (!isExtractableFile(absolutePath)) {
         continue;
       }
 
@@ -213,8 +221,35 @@ async function walkRawCourseFiles(rootDirectory, options = {}) {
 }
 
 async function readRawCourseFile(filePath, maxTextChars) {
-  const rawText = await fs.readFile(filePath, 'utf8');
   const extension = path.extname(filePath).toLowerCase();
+  
+  // Handle binary files with extraction
+  if (isBinaryExtractable(filePath)) {
+    const extractionResult = await extractBinaryFileText(filePath, { maxChars: maxTextChars });
+    
+    if (extractionResult.success) {
+      return {
+        textContent: extractionResult.text,
+        textLength: extractionResult.fullTextLength,
+        textTruncated: extractionResult.truncated,
+        extractionStatus: 'ready',
+        extractionNote: `Binary file extracted successfully.`,
+        extractionMetadata: extractionResult.metadata,
+      };
+    } else {
+      return {
+        textContent: null,
+        textLength: 0,
+        textTruncated: false,
+        extractionStatus: 'error',
+        extractionNote: extractionResult.error,
+        extractionMetadata: null,
+      };
+    }
+  }
+  
+  // Handle raw text files
+  const rawText = await fs.readFile(filePath, 'utf8');
   const normalizedText = normalizeText(extension === '.htm' || extension === '.html' ? stripHtml(rawText) : rawText);
   const truncated = normalizedText.length > maxTextChars;
   const textContent = truncated ? `${normalizedText.slice(0, maxTextChars).trimEnd()}…` : normalizedText;
@@ -223,6 +258,9 @@ async function readRawCourseFile(filePath, maxTextChars) {
     textContent,
     textLength: normalizedText.length,
     textTruncated: truncated,
+    extractionStatus: 'ready',
+    extractionNote: 'Loaded from raw course data directory.',
+    extractionMetadata: null,
   };
 }
 
@@ -250,7 +288,8 @@ async function getRawCourseMaterials(courseId, options = {}) {
     uniqueFilePaths.map(async (filePath) => {
       const stats = await fs.stat(filePath);
       latestTimestamp = Math.max(latestTimestamp, stats.mtimeMs);
-      const { textContent, textLength, textTruncated } = await readRawCourseFile(filePath, maxTextChars);
+      const { textContent, textLength, textTruncated, extractionStatus, extractionNote, extractionMetadata } = 
+        await readRawCourseFile(filePath, maxTextChars);
 
       return {
         id: `raw:${slugifySegment(path.relative(resolveRawCourseDataBaseDir(), filePath))}`,
@@ -262,12 +301,13 @@ async function getRawCourseMaterials(courseId, options = {}) {
         addedAt: new Date(stats.mtimeMs).toISOString(),
         storageRelativePath: path.relative(resolveRawCourseDataBaseDir(), filePath),
         textRelativePath: null,
-        textExtracted: true,
+        textExtracted: extractionStatus === 'ready' && textContent !== null,
         textLength,
-        textExcerpt: buildExcerpt(textContent),
+        textExcerpt: textContent ? buildExcerpt(textContent) : null,
         textTruncated,
-        extractionStatus: 'ready',
-        extractionNote: 'Loaded from raw course data directory.',
+        extractionStatus,
+        extractionNote,
+        extractionMetadata,
         source_origin: 'raw_course_data',
         text_content: options.includeTextContent === false ? null : textContent,
         text_content_truncated: textTruncated,

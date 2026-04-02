@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { extractBinaryFileText } from '../../mcp-server/file-extractor.mjs';
 import type {
   CourseKnowledgeBase,
   CourseKnowledgeBaseSummary,
@@ -16,6 +17,7 @@ const MAX_TEXT_EXTRACTION_BYTES = 2_000_000;
 const TEXT_EXCERPT_LENGTH = 320;
 
 const MIME_TYPES: Record<string, string> = {
+  // Text/code files
   '.c': 'text/x-c',
   '.cpp': 'text/x-c++',
   '.css': 'text/css',
@@ -40,9 +42,31 @@ const MIME_TYPES: Record<string, string> = {
   '.xml': 'application/xml',
   '.yaml': 'text/yaml',
   '.yml': 'text/yaml',
+  // Binary extractable files
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xls': 'application/vnd.ms-excel',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  // Images (OCR)
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.webp': 'image/webp',
+  '.tiff': 'image/tiff',
+  '.tif': 'image/tiff',
 };
 
-const TEXT_EXTENSIONS = new Set(Object.keys(MIME_TYPES));
+const TEXT_EXTENSIONS = new Set(Object.keys(MIME_TYPES).filter(ext => 
+  !['.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.ppt', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif'].includes(ext)
+));
+const BINARY_EXTRACTABLE_EXTENSIONS = new Set([
+  '.pdf', '.docx', '.xlsx', '.xls', '.pptx', '.ppt',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif',
+]);
 const HTML_EXTENSIONS = new Set(['.htm', '.html']);
 
 type CourseMaterialsManifest = {
@@ -220,6 +244,10 @@ function isTextLikeFile(filePath: string) {
   return TEXT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
+function isBinaryExtractableFile(filePath: string) {
+  return BINARY_EXTRACTABLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
 function buildExcerpt(value: string) {
   if (value.length <= TEXT_EXCERPT_LENGTH) {
     return value;
@@ -240,19 +268,51 @@ async function readFileSlice(filePath: string, maxBytes: number) {
   }
 }
 
-async function extractText(filePath: string, sizeBytes: number) {
+async function extractText(filePath: string, sizeBytes: number, absoluteStoragePath: string) {
+  const extension = path.extname(filePath).toLowerCase();
+  
+  // Handle binary extractable files (PDFs, Office docs, Images)
+  if (BINARY_EXTRACTABLE_EXTENSIONS.has(extension)) {
+    const extractionResult = await extractBinaryFileText(absoluteStoragePath, {
+      maxChars: MAX_TEXT_EXTRACTION_BYTES,
+      maxFileSize: 50 * 1024 * 1024, // 50MB
+    });
+    
+    if (extractionResult.success) {
+      return {
+        extractionStatus: 'ready' as const,
+        extractionNote: extractionResult.truncated 
+          ? 'File extracted (truncated for storage)'
+          : 'File extracted successfully',
+        textContent: extractionResult.text,
+        textTruncated: extractionResult.truncated,
+        textLength: extractionResult.fullTextLength,
+      };
+    } else {
+      return {
+        extractionStatus: 'error' as const,
+        extractionNote: extractionResult.error,
+        textContent: '',
+        textTruncated: false,
+        textLength: 0,
+      };
+    }
+  }
+  
+  // Handle text-like files
   if (!isTextLikeFile(filePath)) {
     return {
       extractionStatus: 'unsupported' as const,
       extractionNote: 'Text extraction is not available for this file type yet.',
       textContent: '',
       textTruncated: false,
+      textLength: 0,
     };
   }
 
   const buffer = await readFileSlice(filePath, Math.min(sizeBytes, MAX_TEXT_EXTRACTION_BYTES));
   const decodedText = decodeBuffer(buffer);
-  const replacementCount = (decodedText.match(/�/g) || []).length;
+  const replacementCount = (decodedText.match(/\uFFFD/g) || []).length;
 
   if (decodedText.length > 0 && replacementCount / decodedText.length > 0.05) {
     return {
@@ -260,10 +320,10 @@ async function extractText(filePath: string, sizeBytes: number) {
       extractionNote: 'This file looks binary or uses an unsupported text encoding.',
       textContent: '',
       textTruncated: false,
+      textLength: 0,
     };
   }
 
-  const extension = path.extname(filePath).toLowerCase();
   const normalizedText = normalizeText(
     HTML_EXTENSIONS.has(extension) ? stripHtml(decodedText) : decodedText,
   );
@@ -274,6 +334,7 @@ async function extractText(filePath: string, sizeBytes: number) {
       extractionNote: 'No readable text was found in this file.',
       textContent: '',
       textTruncated: false,
+      textLength: 0,
     };
   }
 
@@ -285,6 +346,7 @@ async function extractText(filePath: string, sizeBytes: number) {
         : null,
     textContent: normalizedText,
     textTruncated: sizeBytes > MAX_TEXT_EXTRACTION_BYTES,
+    textLength: normalizedText.length,
   };
 }
 
@@ -337,7 +399,7 @@ async function importCourseMaterials(
 
       await fs.copyFile(filePath, absoluteStoragePath);
 
-      const extractionResult = await extractText(filePath, fileStats.size);
+      const extractionResult = await extractText(filePath, fileStats.size, absoluteStoragePath);
       let textRelativePath: string | null = null;
 
       if (extractionResult.extractionStatus === 'ready') {
@@ -358,7 +420,7 @@ async function importCourseMaterials(
         storageRelativePath,
         textRelativePath,
         textExtracted: extractionResult.extractionStatus === 'ready',
-        textLength: extractionResult.textContent.length,
+        textLength: extractionResult.textLength,
         textExcerpt: buildExcerpt(extractionResult.textContent),
         textTruncated: extractionResult.textTruncated,
         extractionStatus: extractionResult.extractionStatus,

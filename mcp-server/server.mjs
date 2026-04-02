@@ -17,7 +17,7 @@ import { createCodingProblem, renderCodingProblemMarkdown } from './coding-probl
 import { createQuiz, renderQuizMarkdown } from './quiz-generator.mjs';
 import { CANVAS_SESSION_ENV_VAR, loadSharedCanvasSession } from './session-store.mjs';
 import { createStudyGuide, renderStudyGuideMarkdown } from './study-guide.mjs';
-import { saveCodingProblem } from './coding-problem-store.mjs';
+import { bulkDownloadFiles, saveMaterialsToManifest } from './file-downloader.mjs';
 import { saveStudyGuide } from './study-guide-store.mjs';
 
 const SERVER_NAME = 'canvas-study-guide';
@@ -287,6 +287,45 @@ const TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'bulk_download_files',
+    description:
+      'Download multiple files from Canvas course and extract text from PDFs, Office documents, and images for the knowledge base.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: sessionSchema({ required: false }),
+        courseId: { type: 'number', description: 'Canvas course id.' },
+        fileIds: {
+          type: 'array',
+          description: 'Array of Canvas file IDs to download.',
+          items: { type: 'number' },
+        },
+        maxTextChars: {
+          type: 'number',
+          description: 'Maximum extracted characters per file.',
+          default: 12000,
+        },
+        maxFileSize: {
+          type: 'number',
+          description: 'Maximum file size in bytes (default 50MB).',
+          default: 52428800,
+        },
+        concurrency: {
+          type: 'number',
+          description: 'Number of concurrent downloads (1-5).',
+          default: 3,
+        },
+        includeTextContent: {
+          type: 'boolean',
+          description: 'Include extracted text content in the response.',
+          default: true,
+        },
+      },
+      required: ['courseId', 'fileIds'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function sessionSchema() {
@@ -484,6 +523,37 @@ function buildSchemaDocument() {
           documents_considered_count: 'number',
           source_material: 'array',
         },
+      },
+    },
+    bulkDownloadContract: {
+      required_request_fields: ['courseId', 'fileIds'],
+      output_shape: {
+        courseId: 'number',
+        requested: 'number',
+        downloaded: 'number',
+        saved: 'number',
+        failed: 'number',
+        materials: [
+          {
+            id: 'string',
+            displayName: 'string',
+            sizeBytes: 'number',
+            textExtracted: 'boolean',
+            textLength: 'number',
+            textTruncated: 'boolean',
+            extractionStatus: 'string',
+            extractionNote: 'string',
+            text_content: 'string | optional',
+          },
+        ],
+        errors: [
+          {
+            fileId: 'number',
+            fileName: 'string',
+            error: 'string',
+            skipped: 'boolean',
+          },
+        ],
       },
     },
     tools: TOOL_DEFINITIONS,
@@ -687,6 +757,76 @@ async function callTool(name, argumentsObject = {}) {
         content: createTextContent(renderQuizMarkdown(quiz)),
         structuredContent: quiz,
       };
+    }
+
+    case 'bulk_download_files': {
+      const courseId = assertNumber(argumentsObject.courseId, 'courseId');
+      const fileIds = argumentsObject.fileIds;
+      
+      if (!Array.isArray(fileIds) || fileIds.length === 0) {
+        throw new CanvasClientError('fileIds must be a non-empty array of file IDs.');
+      }
+      
+      const session = await getSession();
+      
+      // Get file metadata for all files
+      const { getFileMetadata } = await import('./canvas-client.mjs');
+      const files = await Promise.all(
+        fileIds.map(async (fileId) => {
+          try {
+            return await getFileMetadata(session, fileId);
+          } catch (error) {
+            return { id: fileId, error: error.message, display_name: `File ${fileId}` };
+          }
+        })
+      );
+      
+      const validFiles = files.filter(f => !f.error);
+      const failedMetadata = files.filter(f => f.error).map(f => ({
+        fileId: f.id,
+        fileName: f.display_name,
+        error: f.error,
+        skipped: true,
+      }));
+      
+      // Download and extract files
+      const result = await bulkDownloadFiles(session, validFiles, {
+        courseId,
+        maxTextChars: argumentsObject.maxTextChars,
+        maxFileSize: argumentsObject.maxFileSize,
+        concurrency: argumentsObject.concurrency,
+        includeTextContent: argumentsObject.includeTextContent,
+      });
+      
+      // Save to manifest
+      if (result.materials.length > 0) {
+        await saveMaterialsToManifest(courseId, result.materials);
+      }
+      
+      const allErrors = [...failedMetadata, ...result.errors];
+      
+      return createJsonResponse(
+        {
+          courseId,
+          requested: fileIds.length,
+          downloaded: result.downloaded,
+          saved: result.materials.length,
+          failed: allErrors.length,
+          materials: result.materials.map(m => ({
+            id: m.id,
+            displayName: m.displayName,
+            sizeBytes: m.sizeBytes,
+            textExtracted: m.textExtracted,
+            textLength: m.textLength,
+            textTruncated: m.textTruncated,
+            extractionStatus: m.extractionStatus,
+            extractionNote: m.extractionNote,
+            text_content: argumentsObject.includeTextContent !== false ? m.text_content : undefined,
+          })),
+          errors: allErrors,
+        },
+        `Downloaded ${result.downloaded}/${fileIds.length} files. ${result.downloaded > 0 ? `Saved to course ${courseId} knowledge base.` : ''} ${allErrors.length > 0 ? `${allErrors.length} files failed.` : ''}`
+      );
     }
 
     default:
