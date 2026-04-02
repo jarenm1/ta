@@ -1,0 +1,67 @@
+name: Release to NPM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get package version
+        id: package
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: Check if version exists on NPM
+        id: check
+        run: |
+          VERSION="${{ steps.package.outputs.version }}"
+          if npm view tagent@"${VERSION}" >/dev/null 2>&1; then
+            echo "Version ${VERSION} already exists on NPM"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version ${VERSION} does not exist on NPM"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists != 'true'
+        run: npm ci
+
+      - name: Build app
+        if: steps.check.outputs.exists != 'true'
+        run: npm run package
+
+      - name: Run linter
+        if: steps.check.outputs.exists != 'true'
+        run: npm run lint
+
+      - name: Publish to NPM
+        if: steps.check.outputs.exists != 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.package.outputs.version }}
+          name: Release v${{ steps.package.outputs.version }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

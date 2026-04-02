@@ -31,6 +31,76 @@ interface AssemblerResult {
   error?: string;
 }
 
+const PSEUDO_INSTRUCTIONS: Record<string, (tokens: string[], labels: Map<string, number>, currentAddr: number) => number> = {
+  'li': (tokens, labels) => {
+    const imm = parseImmediate(tokens[2], labels);
+    if (imm === null) return 0;
+    return (imm > 0xFFFF || imm < -0x8000) ? 2 : 1;
+  },
+  'la': () => 2,
+  'move': () => 1,
+  'nop': () => 1,
+};
+
+function expandPseudoInstruction(tokens: string[], labels: Map<string, number>, currentAddr: number): number[] {
+  const instr = tokens[0].toLowerCase();
+  const instructions: number[] = [];
+  
+  switch (instr) {
+    case 'li': {
+      const rt = parseRegister(tokens[1]);
+      const imm = parseImmediate(tokens[2], labels);
+      if (rt === null || imm === null) return [];
+      
+      // If value fits in 16 bits, use ori $zero, rt, imm
+      // Otherwise use lui + ori
+      if (imm >= -0x8000 && imm <= 0xFFFF) {
+        // ori $zero, rt, imm (opcode 0x0d)
+        const machineCode = (0x0d << 26) | (0 << 21) | (rt << 16) | (imm & 0xFFFF);
+        instructions.push(machineCode >>> 0);
+      } else {
+        // lui rt, upper(imm) followed by ori rt, rt, lower(imm)
+        const upper = (imm >>> 16) & 0xFFFF;
+        const lower = imm & 0xFFFF;
+        const luiCode = (0x0f << 26) | (0 << 21) | (rt << 16) | upper;
+        const oriCode = (0x0d << 26) | (rt << 21) | (rt << 16) | lower;
+        instructions.push(luiCode >>> 0, oriCode >>> 0);
+      }
+      break;
+    }
+    case 'la': {
+      const rt = parseRegister(tokens[1]);
+      const addr = parseImmediate(tokens[2], labels);
+      if (rt === null || addr === null) return [];
+      
+      // lui rt, upper(addr) followed by ori rt, rt, lower(addr)
+      const upper = (addr >>> 16) & 0xFFFF;
+      const lower = addr & 0xFFFF;
+      const luiCode = (0x0f << 26) | (0 << 21) | (rt << 16) | upper;
+      const oriCode = (0x0d << 26) | (rt << 21) | (rt << 16) | lower;
+      instructions.push(luiCode >>> 0, oriCode >>> 0);
+      break;
+    }
+    case 'move': {
+      const rd = parseRegister(tokens[1]);
+      const rs = parseRegister(tokens[2]);
+      if (rd === null || rs === null) return [];
+      
+      // or rd, rs, $zero (R-type: funct 0x25)
+      const machineCode = (rs << 21) | (0 << 16) | (rd << 11) | 0x25;
+      instructions.push(machineCode >>> 0);
+      break;
+    }
+    case 'nop': {
+      // sll $zero, $zero, 0 (R-type: funct 0x00)
+      instructions.push(0 >>> 0);
+      break;
+    }
+  }
+  
+  return instructions;
+}
+
 const REG_NAMES: Record<string, number> = {
   zero: 0, at: 1, v0: 2, v1: 3, a0: 4, a1: 5, a2: 6, a3: 7,
   t0: 8, t1: 9, t2: 10, t3: 11, t4: 12, t5: 13, t6: 14, t7: 15,
@@ -139,7 +209,14 @@ function assemble(source: string): AssemblerResult {
     }
     
     if (currentSection === 'text') {
-      textAddr += 4;
+      const instr = tokens[tokenIdx].toLowerCase();
+      const pseudoHandler = PSEUDO_INSTRUCTIONS[instr];
+      if (pseudoHandler) {
+        const count = pseudoHandler(tokens.slice(tokenIdx), labels, textAddr);
+        textAddr += count * 4;
+      } else {
+        textAddr += 4;
+      }
     } else {
       if (directive === '.word') {
         dataAddr += (tokens.length - tokenIdx - 1) * 4;
@@ -184,8 +261,20 @@ function assemble(source: string): AssemblerResult {
     
     if (currentSection === 'text') {
       const instr = tokens[tokenIdx];
-      const opcode = OPCODES[instr.toLowerCase()];
-      const funct = FUNCTS[instr.toLowerCase()];
+      const instrLower = instr.toLowerCase();
+      const opcode = OPCODES[instrLower];
+      const funct = FUNCTS[instrLower];
+      const pseudoHandler = PSEUDO_INSTRUCTIONS[instrLower];
+      
+      if (pseudoHandler) {
+        // Expand pseudo-instruction
+        const pseudoInstrs = expandPseudoInstruction(tokens.slice(tokenIdx), labels, textAddr);
+        for (const pseudoInstr of pseudoInstrs) {
+          textSection.push(pseudoInstr);
+          textAddr += 4;
+        }
+        continue;
+      }
       
       let machineCode = 0;
       

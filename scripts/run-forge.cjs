@@ -54,7 +54,7 @@ const forgeBinary = path.resolve(
 );
 
 if (forgeCommand === 'start' && env.TA_DISABLE_MCP_AUTOSTART !== '1') {
-  mcpChild = spawn(path.resolve(__dirname, 'run-mcp-server.sh'), [], {
+  mcpChild = spawn('node', [path.resolve(__dirname, '..', 'mcp-server', 'server.mjs')], {
     stdio: 'inherit',
     env,
   });
