@@ -114,6 +114,36 @@ type AgentAuthStatus = {
   source: 'codex_session' | 'env' | null;
 };
 
+type ToolParameterType = 'string' | 'number' | 'boolean' | 'array' | 'object';
+
+type ToolParameter = {
+  name: string;
+  type: ToolParameterType;
+  description: string;
+  required?: boolean;
+  items?: ToolParameter;
+  properties?: Record<string, ToolParameter>;
+};
+
+type ToolDefinition = {
+  name: string;
+  description: string;
+  parameters: ToolParameter[];
+};
+
+type ToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+type ToolResult = {
+  toolCallId: string;
+  name: string;
+  result: unknown;
+  error?: string;
+};
+
 type AgentChatRequest = {
   apiKey?: string | null;
   context?: AgentChatContext;
@@ -125,8 +155,8 @@ type AgentChatRequest = {
   model?: string | null;
   previousResponseId?: string | null;
   provider?: string | null;
-  // TOOLS STUB: Tool definitions for model-agnostic tool execution
-  // tools?: ToolDefinition[];
+  stream?: boolean;
+  tools?: ToolDefinition[];
 };
 
 type AgentChatResponse = {
@@ -135,14 +165,39 @@ type AgentChatResponse = {
   responseId: string | null;
   retryCount?: number;
   source: 'codex_session' | 'env';
-  // TOOLS STUB: Tool execution results
-  // toolCalls?: ToolCall[];
-  // toolResults?: ToolResult[];
+  thinking?: string;
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
+  done?: boolean;
+};
+
+type AgentChatStreamEvent = {
+  type: 'thinking' | 'content' | 'tool_call' | 'tool_result' | 'error' | 'done';
+  data: string | ToolCall | ToolResult | { error: string };
+  messageId?: string;
 };
 
 type CanvasApiBridge = {
+  bulkDownloadFiles: (courseId: number, fileIds: string[], options?: {
+    maxTextChars?: number;
+    maxFileSize?: number;
+    concurrency?: number;
+  }) => Promise<{
+    downloaded: number;
+    failed: number;
+    materials: Array<{
+      id: string;
+      displayName: string;
+      sizeBytes: number;
+      textExtracted: boolean;
+      textLength: number;
+      extractionStatus: string;
+    }>;
+    errors: Array<{ fileId: string; fileName: string; error: string }>;
+  }>;
   getAgentAuthStatus: () => Promise<AgentAuthStatus>;
   sendAgentChatMessage: (request: AgentChatRequest) => Promise<AgentChatResponse>;
+  onAgentChatStream: (callback: (event: AgentChatStreamEvent) => void) => () => void;
   listCourses: (session: CanvasSession) => Promise<CanvasCourse[]>;
   listCourseAssignments: (session: CanvasSession, courseId: number) => Promise<CanvasAssignment[]>;
   listCourseMaterials: (courseId: number) => Promise<CourseKnowledgeBase>;
@@ -220,6 +275,7 @@ export type {
   AgentChatContext,
   AgentChatRequest,
   AgentChatResponse,
+  AgentChatStreamEvent,
   CanvasApiBridge,
   CanvasApiErrorPayload,
   CanvasAssignment,
@@ -237,5 +293,9 @@ export type {
   StudyGuideMarkdownDocument,
   CanvasSession,
   CanvasTerm,
+  ToolCall,
+  ToolDefinition,
+  ToolParameter,
+  ToolResult,
   UploadCourseMaterialsResult,
 };

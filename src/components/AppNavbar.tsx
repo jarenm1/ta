@@ -23,7 +23,7 @@ export default function AppNavbar() {
 
   return (
     <header className="z-50 shrink-0 border-b border-neutral-200 bg-neutral-100 dark:border-neutral-800 dark:bg-neutral-900">
-      <div className="mx-auto max-w-7xl px-6">
+      <div className="w-full px-4 sm:px-6 lg:px-8">
         <div className="flex min-h-16 items-center justify-between gap-4 py-3">
           <Link
             className="shrink-0 rounded-md text-sm font-semibold tracking-[0.2em] text-neutral-900 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 dark:text-neutral-100"

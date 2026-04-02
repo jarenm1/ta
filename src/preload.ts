@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AgentAuthStatus,
   AgentChatResponse,
+  AgentChatStreamEvent,
   CanvasApiBridge,
   CanvasAssignment,
   CanvasCourse,
@@ -12,10 +13,19 @@ import type { CourseKnowledgeBase, UploadCourseMaterialsResult } from './lib/cou
 import type { CourseStudyGuideList, StudyGuideMarkdownDocument } from './lib/studyGuides';
 
 const canvasApi: CanvasApiBridge = {
+  bulkDownloadFiles: (courseId, fileIds, options) =>
+    ipcRenderer.invoke('canvas:bulk-download-files', courseId, fileIds, options),
   getAgentAuthStatus: () =>
     ipcRenderer.invoke('canvas:get-agent-auth-status') as Promise<AgentAuthStatus>,
   sendAgentChatMessage: (request) =>
     ipcRenderer.invoke('canvas:send-agent-chat-message', request) as Promise<AgentChatResponse>,
+  onAgentChatStream: (callback) => {
+    const wrappedCallback = (_event: Electron.IpcRendererEvent, data: AgentChatStreamEvent) => callback(data);
+    ipcRenderer.on('agent-chat-stream', wrappedCallback);
+    return () => {
+      ipcRenderer.removeListener('agent-chat-stream', wrappedCallback);
+    };
+  },
   loadSharedSession: () =>
     ipcRenderer.invoke('canvas:load-shared-session') as Promise<CanvasSession | null>,
   saveSharedSession: (session: CanvasSession) =>

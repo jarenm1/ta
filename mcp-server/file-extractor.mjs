@@ -11,8 +11,8 @@ let sharp = null;
 
 async function loadPdfParse() {
   if (!pdfParse) {
-    const { default: pdfParseLib } = await import('pdf-parse/lib/pdf-parse.js');
-    pdfParse = pdfParseLib;
+    const { PDFParse } = await import('pdf-parse');
+    pdfParse = PDFParse;
   }
   return pdfParse;
 }
@@ -102,11 +102,13 @@ function truncateText(text, maxChars) {
 
 async function extractPdfText(filePath, maxChars) {
   try {
-    const pdfParse = await loadPdfParse();
+    const PDFParse = await loadPdfParse();
     const dataBuffer = await fs.readFile(filePath);
-    const result = await pdfParse(dataBuffer);
-    const text = normalizeText(result.text);
+    const parser = new PDFParse({ data: dataBuffer });
+    const [textResult, infoResult] = await Promise.all([parser.getText(), parser.getInfo()]);
+    const text = normalizeText(textResult.text);
     const { text: truncatedText, truncated } = truncateText(text, maxChars);
+    await parser.destroy();
 
     return {
       success: true,
@@ -114,8 +116,8 @@ async function extractPdfText(filePath, maxChars) {
       fullTextLength: text.length,
       truncated,
       metadata: {
-        pageCount: result.numpages || null,
-        info: result.info || null,
+        pageCount: textResult.total || null,
+        info: infoResult.info || null,
       },
     };
   } catch (error) {

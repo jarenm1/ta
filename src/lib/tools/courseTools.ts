@@ -5,12 +5,18 @@ import { type CourseStudyGuideList } from '../studyGuides';
 // Tool to list all courses
 export async function listCourses(): Promise<Array<{ id: number; name: string; code: string }>> {
   try {
-    const coursesJson = await import('../../data/courses.json', { assert: { type: 'json' } });
-    const courses = coursesJson.default || coursesJson;
-    return courses.map((c: { id: number; name: string; code: string }) => ({
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    const session = await window.canvasApi.loadSharedSession();
+    if (!session) {
+      throw new Error('No Canvas session available');
+    }
+    const courses = await window.canvasApi.listCourses(session);
+    return courses.map((c) => ({
       id: c.id,
-      name: c.name,
-      code: c.code,
+      name: c.name || c.course_code || `Course ${c.id}`,
+      code: c.course_code || '',
     }));
   } catch {
     return [];
@@ -20,8 +26,10 @@ export async function listCourses(): Promise<Array<{ id: number; name: string; c
 // Tool to get course materials
 export async function getCourseMaterials(courseId: number): Promise<CourseKnowledgeBase | null> {
   try {
-    const { listCourseMaterials } = await import('../canvasApi');
-    return await listCourseMaterials(courseId);
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    return await window.canvasApi.listCourseMaterials(courseId);
   } catch {
     return null;
   }
@@ -40,10 +48,12 @@ export async function searchCourseMaterials(
     const lowerQuery = query.toLowerCase();
     
     for (const material of materials.materials) {
-      if (material.extractedText?.toLowerCase().includes(lowerQuery)) {
+      // Search in excerpt or display name
+      const searchText = (material.textExcerpt + ' ' + material.displayName).toLowerCase();
+      if (searchText.includes(lowerQuery)) {
         results.push({
-          title: material.fileName,
-          excerpt: material.extractedText.slice(0, 200) + '...',
+          title: material.displayName,
+          excerpt: material.textExcerpt.slice(0, 200) + (material.textExcerpt.length > 200 ? '...' : ''),
           materialId: material.id,
         });
       }
@@ -58,8 +68,10 @@ export async function searchCourseMaterials(
 // Tool to get study guides for a course
 export async function getStudyGuides(courseId: number): Promise<CourseStudyGuideList | null> {
   try {
-    const { listStudyGuides } = await import('../canvasApi');
-    return await listStudyGuides(courseId);
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    return await window.canvasApi.listStudyGuides(courseId);
   } catch {
     return null;
   }
@@ -71,13 +83,15 @@ export async function getStudyGuide(
   guideId: string
 ): Promise<{ title: string; content: string } | null> {
   try {
-    const { getStudyGuideMarkdown } = await import('../canvasApi');
-    const guide = await getStudyGuideMarkdown(courseId, guideId);
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    const guide = await window.canvasApi.getStudyGuideMarkdown(courseId, guideId);
     if (!guide) return null;
     
     return {
-      title: guide.title,
-      content: guide.content,
+      title: guide.guide.title,
+      content: guide.markdown,
     };
   } catch {
     return null;
@@ -87,8 +101,10 @@ export async function getStudyGuide(
 // Tool to get coding problems for a course
 export async function getCodingProblems(courseId: number): Promise<CourseCodingProblemList | null> {
   try {
-    const { listCodingProblems } = await import('../canvasApi');
-    return await listCodingProblems(courseId);
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    return await window.canvasApi.listCodingProblems(courseId);
   } catch {
     return null;
   }
@@ -100,15 +116,20 @@ export async function getCodingProblem(
   problemId: string
 ): Promise<{ title: string; description: string; starterCode: string; testCases: unknown[] } | null> {
   try {
-    const { getCodingProblem } = await import('../canvasApi');
-    const problem = await getCodingProblem(courseId, problemId);
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+    const doc = await window.canvasApi.getCodingProblem(courseId, problemId);
+    if (!doc) return null;
+    
+    const problem = doc.payload?.problem;
     if (!problem) return null;
     
     return {
       title: problem.title,
-      description: problem.description,
-      starterCode: problem.starterCode || '',
-      testCases: problem.testCases || [],
+      description: problem.description?.join('\n') || '',
+      starterCode: problem.starter_code || '',
+      testCases: problem.test_cases || [],
     };
   } catch {
     return null;
@@ -131,6 +152,118 @@ export async function runCode(
       output: '',
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+// Tool to download files from Canvas and save to local storage
+export async function downloadCourseFiles(
+  courseId: number,
+  fileIds: string[],
+  options?: {
+    maxTextChars?: number;
+    maxFileSize?: number;
+    concurrency?: number;
+  }
+): Promise<{
+  success: boolean;
+  downloaded: number;
+  failed: number;
+  materials: Array<{
+    id: string;
+    displayName: string;
+    sizeBytes: number;
+    textExtracted: boolean;
+    textLength: number;
+    extractionStatus: string;
+  }>;
+  errors: Array<{ fileId: string; fileName: string; error: string }>;
+  message: string;
+}> {
+  try {
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+
+    // Get Canvas session
+    const session = await window.canvasApi.loadSharedSession();
+    if (!session) {
+      throw new Error('No Canvas session available. Please configure your Canvas credentials first.');
+    }
+
+    // Call the MCP server's bulk download via IPC
+    // We'll need to add this endpoint to main.ts
+    const result = await window.canvasApi.bulkDownloadFiles(courseId, fileIds, {
+      maxTextChars: options?.maxTextChars || 12000,
+      maxFileSize: options?.maxFileSize || 50 * 1024 * 1024, // 50MB
+      concurrency: options?.concurrency || 3,
+    });
+
+    return {
+      success: true,
+      downloaded: result.downloaded,
+      failed: result.failed,
+      materials: result.materials,
+      errors: result.errors,
+      message: `Downloaded ${result.downloaded}/${fileIds.length} files from Canvas. ${result.failed > 0 ? `${result.failed} files failed.` : ''}`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      downloaded: 0,
+      failed: fileIds.length,
+      materials: [],
+      errors: fileIds.map(id => ({ fileId: id, fileName: `File ${id}`, error: error instanceof Error ? error.message : 'Unknown error' })),
+      message: `Failed to download files: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+// Tool to upload local files to course knowledge base
+export async function uploadLocalFiles(
+  courseId: number,
+  filePaths: string[]
+): Promise<{
+  success: boolean;
+  imported: number;
+  skipped: number;
+  materials: Array<{
+    id: string;
+    displayName: string;
+    sizeBytes: number;
+    textExtracted: boolean;
+  }>;
+  errors: Array<{ fileName: string; reason: string }>;
+  message: string;
+}> {
+  try {
+    if (!window.canvasApi) {
+      throw new Error('Canvas API not available');
+    }
+
+    const result = await window.canvasApi.uploadCourseMaterials(courseId, filePaths);
+
+    return {
+      success: true,
+      imported: result.imported.length,
+      skipped: result.skipped.length,
+      materials: result.imported.map(m => ({
+        id: m.id,
+        displayName: m.displayName,
+        sizeBytes: m.sizeBytes,
+        textExtracted: m.textExtracted,
+      })),
+      errors: result.skipped.map(s => ({ fileName: s.name, reason: s.reason })),
+      message: `Uploaded ${result.imported.length} files to course knowledge base. ${result.skipped.length > 0 ? `${result.skipped.length} files skipped.` : ''}`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      imported: 0,
+      skipped: filePaths.length,
+      materials: [],
+      errors: filePaths.map(path => ({ fileName: path, reason: error instanceof Error ? error.message : 'Unknown error' })),
+      message: `Failed to upload files: ${error instanceof Error ? error.message : 'Unknown error'}`,
     };
   }
 }

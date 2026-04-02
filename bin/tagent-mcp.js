@@ -25,8 +25,7 @@ const CLIENT_CONFIGS = {
       config.mcp['tagent-canvas'] = {
         type: 'local',
         command: ['tagent-mcp'],
-        enabled: true,
-        description: 'Teaching Assistant Canvas MCP server'
+        enabled: true
       };
       
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
@@ -275,8 +274,7 @@ function printJsonConfig() {
       'tagent-canvas': {
         type: 'local',
         command: ['tagent-mcp'],
-        enabled: true,
-        description: 'Teaching Assistant Canvas MCP server'
+        enabled: true
       }
     }
   }, null, 2));

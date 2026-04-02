@@ -20,6 +20,9 @@ import {
   type CodingWorkspaceRunRequest,
   type CodingWorkspaceRunResult,
   type CanvasSession,
+  type ToolCall,
+  type ToolResult,
+  type AgentChatStreamEvent,
 } from './lib/canvasApi';
 import {
   importCourseMaterials,
@@ -79,6 +82,14 @@ let codingProblemStorePromise: Promise<{
 const OPENAI_RESPONSES_ENDPOINT = 'https://api.openai.com/v1/responses';
 const DEFAULT_AGENT_MODEL = process.env.TA_OPENAI_CHAT_MODEL || 'gpt-5.1-codex-mini';
 const CODEX_CLI_TIMEOUT_MS = 180000;
+const MAIN_WINDOW_DEV_SERVER_URL =
+  typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined'
+    ? MAIN_WINDOW_VITE_DEV_SERVER_URL
+    : process.env.MAIN_WINDOW_VITE_DEV_SERVER_URL;
+const MAIN_WINDOW_NAME =
+  typeof MAIN_WINDOW_VITE_NAME !== 'undefined'
+    ? MAIN_WINDOW_VITE_NAME
+    : process.env.MAIN_WINDOW_VITE_NAME || 'main_window';
 
 async function loadStudyGuideStore() {
   if (!studyGuideStorePromise) {
@@ -465,6 +476,54 @@ function extractResponseText(payload: any): string {
   return textParts.join('\n\n').trim();
 }
 
+// Helper function to emit streaming events to the renderer
+function emitAgentChatStream(event: AgentChatStreamEvent) {
+  const windows = BrowserWindow.getAllWindows();
+  windows.forEach((window) => {
+    window.webContents.send('agent-chat-stream', event);
+  });
+}
+
+// Extract thinking content from response payload
+function extractThinkingContent(payload: any): string {
+  if (typeof payload?.reasoning?.content === 'string') {
+    return payload.reasoning.content;
+  }
+  
+  // Check for reasoning in output items
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  const thinkingParts = output.flatMap((item: any) => {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    return content
+      .filter((part: any) => part?.type === 'reasoning')
+      .map((part: any) => part.text || part.content || '')
+      .filter(Boolean);
+  });
+  
+  return thinkingParts.join('\n\n').trim();
+}
+
+// Extract tool calls from response payload
+function extractToolCalls(payload: any): ToolCall[] {
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  const toolCalls: ToolCall[] = [];
+  
+  output.forEach((item: any) => {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    content.forEach((part: any) => {
+      if (part?.type === 'tool_use' || part?.type === 'function_call') {
+        toolCalls.push({
+          id: part.id || `tool-${Date.now()}-${toolCalls.length}`,
+          name: part.name || part.function?.name || 'unknown',
+          arguments: part.arguments || part.input || part.function?.arguments || {},
+        });
+      }
+    });
+  });
+  
+  return toolCalls;
+}
+
 // Retry helper with exponential backoff
 async function withRetry<T>(
   operation: () => Promise<T>,
@@ -574,6 +633,7 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'ta-opencode-chat-'));
     const outputPath = path.join(tempDir, 'last-message.txt');
     const workspaceDir = path.join(app.getPath('userData'), 'opencode-chat-workspace');
+    const messageId = `msg-${Date.now()}`;
 
     try {
       await mkdir(workspaceDir, { recursive: true });
@@ -584,6 +644,10 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
         args.push('--model', request.model);
       }
       args.push(buildCodexPrompt(request));
+
+      let streamingStarted = false;
+      let accumulatedThinking = '';
+      let accumulatedContent = '';
 
       const { result, retryCount } = await withRetry(async () => {
         return new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
@@ -600,11 +664,40 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
           let stderr = '';
 
           child.stdout?.on('data', (data) => {
-            stdout += data.toString();
+            const chunk = data.toString();
+            stdout += chunk;
+            
+            // Emit streaming content as it arrives
+            if (!streamingStarted) {
+              streamingStarted = true;
+              emitAgentChatStream({
+                type: 'thinking',
+                data: 'Processing...',
+                messageId,
+              });
+            }
+            
+            accumulatedContent += chunk;
+            emitAgentChatStream({
+              type: 'content',
+              data: chunk,
+              messageId,
+            });
           });
 
           child.stderr?.on('data', (data) => {
-            stderr += data.toString();
+            const chunk = data.toString();
+            stderr += chunk;
+            
+            // Emit stderr as thinking/thought process
+            if (chunk.trim()) {
+              accumulatedThinking += chunk;
+              emitAgentChatStream({
+                type: 'thinking',
+                data: chunk,
+                messageId,
+              });
+            }
           });
 
           child.on('close', (code) => {
@@ -620,6 +713,11 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
       const combinedOutput = `${result.stdout}\n${result.stderr}`;
 
       if (result.exitCode !== 0) {
+        emitAgentChatStream({
+          type: 'error',
+          data: { error: combinedOutput.trim() || `OpenCode failed with status ${result.exitCode}.` },
+          messageId,
+        });
         throw new Error(
           combinedOutput.trim() || `OpenCode failed with status ${result.exitCode}.`,
         );
@@ -631,12 +729,28 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
         throw new Error('OpenCode returned an empty response.');
       }
 
+      // Emit final content and done event
+      if (accumulatedContent !== message) {
+        emitAgentChatStream({
+          type: 'content',
+          data: message.slice(accumulatedContent.length),
+          messageId,
+        });
+      }
+      
+      emitAgentChatStream({
+        type: 'done',
+        data: '',
+        messageId,
+      });
+
       return {
         message,
         model: request.model || 'opencode-auto',
         responseId: null,
         retryCount,
         source: 'env',
+        thinking: accumulatedThinking || undefined,
       };
     } finally {
       await rm(tempDir, { force: true, recursive: true });
@@ -652,6 +766,9 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
     }
 
     const model = request.model || DEFAULT_AGENT_MODEL;
+    
+    // Generate a message ID for streaming events
+    const messageId = `msg-${Date.now()}`;
     
     const { result: response, retryCount } = await withRetry(async () => {
       const res = await fetch(OPENAI_RESPONSES_ENDPOINT, {
@@ -686,10 +803,65 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
 
     const payload = await response.json();
     const message = extractResponseText(payload);
+    const thinking = extractThinkingContent(payload);
+    const toolCalls = extractToolCalls(payload);
 
-    if (!message) {
+    if (!message && !thinking) {
       throw new Error('OpenAI returned an empty response.');
     }
+
+    // Emit thinking content in chunks to simulate streaming
+    let thinkingChunks: string[] = [];
+    if (thinking) {
+      thinkingChunks = thinking.split(/(?<=[.!?])\s+/);
+      thinkingChunks.forEach((chunk, index) => {
+        setTimeout(() => {
+          emitAgentChatStream({
+            type: 'thinking',
+            data: chunk + (index < thinkingChunks.length - 1 ? ' ' : ''),
+            messageId,
+          });
+        }, index * 30); // 30ms delay between thinking chunks
+      });
+    }
+
+    // Wait for thinking to complete before emitting content
+    const thinkingDelay = thinking ? thinkingChunks.length * 30 + 100 : 0;
+
+    // Emit tool calls if present
+    toolCalls.forEach((toolCall) => {
+      setTimeout(() => {
+        emitAgentChatStream({
+          type: 'tool_call',
+          data: toolCall,
+          messageId,
+        });
+      }, thinkingDelay);
+    });
+
+    // Emit content in chunks to simulate streaming
+    let chunks: string[] = [];
+    if (message) {
+      chunks = message.split(/(?<=[.!?])\s+/);
+      chunks.forEach((chunk, index) => {
+        setTimeout(() => {
+          emitAgentChatStream({
+            type: 'content',
+            data: chunk + (index < chunks.length - 1 ? ' ' : ''),
+            messageId,
+          });
+        }, thinkingDelay + (index * 50)); // 50ms delay between chunks after thinking
+      });
+    }
+
+    // Emit done event after all content
+    setTimeout(() => {
+      emitAgentChatStream({
+        type: 'done',
+        data: '',
+        messageId,
+      });
+    }, message ? thinkingDelay + (chunks.length * 50) + 100 : thinkingDelay + 100);
 
     return {
       message,
@@ -697,6 +869,8 @@ async function sendAgentChatMessage(request: AgentChatRequest): Promise<AgentCha
       responseId: typeof payload?.id === 'string' ? payload.id : null,
       retryCount,
       source: 'env',
+      thinking,
+      toolCalls,
     };
   }
 
@@ -879,6 +1053,97 @@ function registerCanvasHandlers() {
   ipcMain.handle('canvas:remove-course-material', async (_event, courseId: number, materialId: string) => {
     return removeCourseMaterial(courseId, materialId);
   });
+
+  // Bulk download files from Canvas
+  ipcMain.handle('canvas:bulk-download-files', async (_event, courseId: number, fileIds: string[], options?: {
+    maxTextChars?: number;
+    maxFileSize?: number;
+    concurrency?: number;
+  }) => {
+    try {
+      const session = await loadSharedCanvasSession();
+      if (!session) {
+        throw new Error('No Canvas session available');
+      }
+
+      // Import the MCP file downloader dynamically
+      const fileDownloaderPath = path.join(__dirname, 'mcp-server', 'file-downloader.mjs');
+      const canvasClientPath = path.join(__dirname, 'mcp-server', 'canvas-client.mjs');
+      
+      const { bulkDownloadFiles, saveMaterialsToManifest } = await import(fileDownloaderPath);
+      const { getFileMetadata } = await import(canvasClientPath);
+
+      // Get file metadata for all files
+      const files = await Promise.all(
+        fileIds.map(async (fileId: string) => {
+          try {
+            return await getFileMetadata(session, fileId);
+          } catch (error: unknown) {
+            return { 
+              id: fileId, 
+              error: error instanceof Error ? error.message : 'Unknown error', 
+              display_name: `File ${fileId}` 
+            };
+          }
+        })
+      );
+
+      const validFiles = files.filter((f: { error?: string }) => !f.error);
+      const failedMetadata = files.filter((f: { error?: string; id: string; display_name: string }) => f.error).map((f: { id: string; display_name: string; error: string }) => ({
+        fileId: f.id,
+        fileName: f.display_name,
+        error: f.error,
+      }));
+
+      // Download and extract files
+      const result = await bulkDownloadFiles(session, validFiles, {
+        courseId,
+        maxTextChars: options?.maxTextChars || 12000,
+        maxFileSize: options?.maxFileSize || 50 * 1024 * 1024,
+        concurrency: options?.concurrency || 3,
+      });
+
+      // Save to manifest
+      if (result.materials.length > 0) {
+        await saveMaterialsToManifest(courseId, result.materials);
+      }
+
+      const allErrors = [...failedMetadata, ...result.errors];
+
+      return {
+        downloaded: result.downloaded,
+        failed: allErrors.length,
+        materials: result.materials.map((m: { 
+          id: string; 
+          displayName: string; 
+          sizeBytes: number; 
+          textExtracted: boolean;
+          textLength: number;
+          extractionStatus: string;
+        }) => ({
+          id: m.id,
+          displayName: m.displayName,
+          sizeBytes: m.sizeBytes,
+          textExtracted: m.textExtracted,
+          textLength: m.textLength,
+          extractionStatus: m.extractionStatus,
+        })),
+        errors: allErrors,
+      };
+    } catch (error) {
+      console.error('Bulk download failed:', error);
+      return {
+        downloaded: 0,
+        failed: fileIds.length,
+        materials: [],
+        errors: fileIds.map(id => ({
+          fileId: id,
+          fileName: `File ${id}`,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })),
+      };
+    }
+  });
 }
 
 const createWindow = () => {
@@ -893,15 +1158,17 @@ const createWindow = () => {
     },
   });
 
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+  if (MAIN_WINDOW_DEV_SERVER_URL) {
+    mainWindow.loadURL(MAIN_WINDOW_DEV_SERVER_URL);
   } else {
     mainWindow.loadFile(
-      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
+      path.join(__dirname, `../renderer/${MAIN_WINDOW_NAME}/index.html`),
     );
   }
 
-  mainWindow.webContents.openDevTools();
+  if (MAIN_WINDOW_DEV_SERVER_URL || process.env.TA_OPEN_DEVTOOLS === '1') {
+    mainWindow.webContents.openDevTools();
+  }
 };
 
 app.on('ready', () => {

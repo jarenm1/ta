@@ -126,4 +126,44 @@ body {
       transform: translateY(0);
     }
   }
+  
+  /* Animation delay utilities for streaming indicators */
+  .animation-delay-150 {
+    animation-delay: 150ms;
+  }
+  
+  .animation-delay-300 {
+    animation-delay: 300ms;
+  }
+  
+  /* Token streaming cursor effect */
+  .token-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.2em;
+    background-color: currentColor;
+    animation: tokenBlink 1s step-end infinite;
+    vertical-align: text-bottom;
+    margin-left: 1px;
+  }
+  
+  @keyframes tokenBlink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+  
+  /* Smooth scrolling for thinking content */
+  .thinking-scroll {
+    scroll-behavior: smooth;
+  }
+  
+  /* Live badge pulse animation */
+  .live-badge {
+    animation: livePulse 2s ease-in-out infinite;
+  }
+  
+  @keyframes livePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
 }
