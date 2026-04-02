@@ -6,7 +6,8 @@
   "main": ".vite/build/main.js",
   "bin": {
     "tagent": "./bin/tagent.js",
-    "ta": "./bin/tagent.js"
+    "ta": "./bin/tagent.js",
+    "tagent-mcp": "./bin/tagent-mcp.js"
   },
   "scripts": {
     "start": "node ./scripts/run-forge.cjs start",
