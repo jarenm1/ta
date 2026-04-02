@@ -19,7 +19,7 @@
           
           src = ./.;
           
-          npmDepsHash = "sha256-4dm7GMCsRAgfQILmx7kBb4C5fVbXuZyKAkGlXTla3x8=";
+          npmDepsHash = "sha256-v4Isp3VjE4JTQe5ZoD5F3thzUbrXy1f4maqNHBta/9o=";
           
           nativeBuildInputs = with pkgs; [
             nodejs
@@ -71,7 +71,7 @@
           
           src = ./.;
           
-          npmDepsHash = "sha256-4dm7GMCsRAgfQILmx7kBb4C5fVbXuZyKAkGlXTla3x8=";
+          npmDepsHash = "sha256-v4Isp3VjE4JTQe5ZoD5F3thzUbrXy1f4maqNHBta/9o=";
           
           # Fix npm cache permission issues
           makeCacheWritable = true;
