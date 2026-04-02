@@ -1,4 +1,0 @@
-[mcp_servers.canvas-app]
-command = "/nix/store/v2210ar51jddnrcx46m53ivv9palc26m-nodejs-24.14.0/bin/node"
-args = ["/home/jaren/ta/app/mcp-server/server.mjs"]
-
