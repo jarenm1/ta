@@ -30,6 +30,7 @@
           
           buildInputs = with pkgs; [
             electronPkg
+            nodejs  # For MCP server
           ];
           
           # Skip npm audit for purity
@@ -58,17 +59,25 @@
             mkdir -p $out/bin
             mkdir -p $out/share/teaching-assistant
             mkdir -p $out/share/applications
+            mkdir -p $out/lib/node_modules/tagent
+            
+            # Copy all project files for node modules
+            cp -r . $out/lib/node_modules/tagent/
             
             # Copy the packaged app
             cp -r out/*-unpacked/* $out/share/teaching-assistant/ 2>/dev/null || cp -r .vite/build/* $out/share/teaching-assistant/ 2>/dev/null || true
             
-            # Create wrapper script
+            # Create wrapper for main app
             makeWrapper ${electronPkg}/bin/electron $out/bin/tagent \
               --add-flags "$out/share/teaching-assistant" \
               --set ELECTRON_OVERRIDE_DIST_PATH "${electronPkg}/bin"
             
-            # Also create 'ta' symlink as shorthand
+            # Create 'ta' symlink as shorthand
             ln -s $out/bin/tagent $out/bin/ta
+            
+            # Create wrapper for MCP server
+            makeWrapper ${pkgs.nodejs}/bin/node $out/bin/tagent-mcp \
+              --add-flags "$out/lib/node_modules/tagent/mcp-server/server.mjs"
             
             # Create desktop file
             cat > $out/share/applications/tagent.desktop <<EOF
@@ -130,6 +139,10 @@ EOF
           tagent = {
             type = "app";
             program = "${teaching-assistant}/bin/tagent";
+          };
+          tagent-mcp = {
+            type = "app";
+            program = "${teaching-assistant}/bin/tagent-mcp";
           };
         };
       }
