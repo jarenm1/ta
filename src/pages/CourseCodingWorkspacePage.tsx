@@ -11,11 +11,10 @@ import type { CodingWorkspaceRunResult } from '../lib/canvasApi';
 import type { CodingProblemDocument, CodingProblemRecord } from '../lib/codingProblems';
 import {
   buildCodingWorkspaceConfigFromProblem,
-  buildCodingWorkspaceRunnableSource,
   getCodingWorkspaceConfig,
   type CodingWorkspaceTestCase,
 } from '../lib/courseFeatures';
-import { runMIPS } from '../lib/mipsSimulator';
+import { runCodingWorkspaceSubmission } from '../lib/codingWorkspaceRunner';
 
 const BUILT_IN_PROBLEM_ID = '__built_in__';
 
@@ -273,49 +272,15 @@ function CourseCodingWorkspacePage() {
   );
 
   const runWorkspaceTestCase = async (testCase: CodingWorkspaceTestCase) => {
-    if (!codingWorkspace || !window.canvasApi) {
+    if (!codingWorkspace) {
       throw new Error('Coding workspace runner is unavailable.');
     }
-
-    const sourceCode = buildCodingWorkspaceRunnableSource(codingWorkspace, code);
-    
-    let nextRunResult: CodingWorkspaceRunResult;
-    
-    if (codingWorkspace.language === 'mips') {
-      // Run MIPS in browser using WASM simulator
-      const startTime = Date.now();
-      const mipsResult = runMIPS(sourceCode, testCase.input);
-      const durationMs = Date.now() - startTime;
-      
-      if (mipsResult.error) {
-        nextRunResult = {
-          durationMs,
-          exitCode: 1,
-          ok: false,
-          phase: 'compile',
-          stderr: mipsResult.error,
-          stdout: '',
-          timedOut: false,
-        };
-      } else {
-        nextRunResult = {
-          durationMs,
-          exitCode: mipsResult.exitCode ?? 0,
-          ok: mipsResult.exitCode === 0 && !mipsResult.stderr,
-          phase: 'run',
-          stderr: mipsResult.stderr,
-          stdout: mipsResult.stdout,
-          timedOut: false,
-        };
-      }
-    } else {
-      // Run C++ in backend
-      nextRunResult = await window.canvasApi.runCodingWorkspace({
-        language: 'cpp',
-        sourceCode,
-        stdin: testCase.input,
-      });
-    }
+    const nextRunResult: CodingWorkspaceRunResult = await runCodingWorkspaceSubmission(
+      codingWorkspace,
+      code,
+      testCase.input,
+      window.canvasApi ?? null,
+    );
     
     const nextVerdict = getTestCaseVerdict(testCase, nextRunResult);
 
